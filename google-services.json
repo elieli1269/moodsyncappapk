@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "764322061858",
+    "project_id": "moodsync-adf98",
+    "storage_bucket": "moodsync-adf98.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:764322061858:android:8be4793191ed1b166db47b",
+        "android_client_info": {
+          "package_name": "net.alwaysdata.moodsync"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAUVnXEtMDLyTQQrAx9GovHUSrecraQ9ys"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
