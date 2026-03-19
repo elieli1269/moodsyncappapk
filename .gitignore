@@ -1,0 +1,16 @@
+# Buildozer
+.buildozer/
+bin/
+build.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NE PAS ignorer google-services.json (nécessaire pour le build)
+# !google-services.json
