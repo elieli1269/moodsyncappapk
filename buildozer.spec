@@ -37,7 +37,7 @@ android.gradle_dependencies = \
 android.gradle_plugins = com.google.gms:google-services:4.3.15
 
 android.entrypoint  = org.kivy.android.PythonActivity
-android.apptheme    = @android:style/Theme.NoTitleBar.Fullscreen
+android.apptheme    = @android:style/Theme.NoTitleBar
 orientation         = portrait
 presplash.color     = #161619
 
