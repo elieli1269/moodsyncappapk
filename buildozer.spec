@@ -1,7 +1,7 @@
 [app]
 title           = MoodSync
 package.name    = moodsync
-package.domain  = net.alwaysdata.moodsync
+package.domain  = net.alwaysdata
 source.dir      = .
 source.include_exts = py,png,jpg,json,kv,ttf
 version         = 1.0
