@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""
-MoodSync Mobile v2 — WebView + FCM + polling + login auto
-"""
+"""MoodSync Mobile v4 — ultra-safe startup"""
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
-from kivy.uix.widget import Widget
 from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
+from kivy.uix.scrollview import ScrollView
 from kivy.core.window import Window
 from kivy.utils import platform
 from kivy.graphics import Color, Rectangle, RoundedRectangle, Ellipse
@@ -19,17 +18,20 @@ from kivy.properties import StringProperty, BooleanProperty, NumericProperty
 import os, json, threading, time
 
 HOME_URL    = "https://moodsync.alwaysdata.net"
-LOGIN_URL   = "https://moodsync.alwaysdata.net/login.php"
+LOGIN_URL   = HOME_URL + "/login.php"
 CHAT_URL    = HOME_URL + "/chat.php"
 NOTIF_URL   = HOME_URL + "/notifications.php"
 PROFILE_URL = HOME_URL + "/profile.php"
 API_MSGS    = HOME_URL + "/api/messages_count.php"
 API_NOTIFS  = HOME_URL + "/api/notifications_count.php"
 API_FCM_REG = HOME_URL + "/api/fcm_register.php"
+API_SEND    = HOME_URL + "/api/send_message.php"
+API_CONVS   = HOME_URL + "/api/conversations.php"
 
 MS_BG      = (0.086, 0.086, 0.102, 1)
 MS_NAVBAR  = (0.065, 0.065, 0.085, 1)
 MS_TOOL    = (0.090, 0.090, 0.118, 1)
+MS_SURFACE = (0.122, 0.122, 0.157, 1)
 MS_ACCENT  = (0.486, 0.361, 0.988, 1)
 MS_ACCENT2 = (0.655, 0.545, 0.988, 1)
 MS_TEXT    = (0.910, 0.902, 0.941, 1)
@@ -37,6 +39,8 @@ MS_DIM     = (0.533, 0.502, 0.627, 1)
 MS_GREEN   = (0.506, 0.788, 0.584, 1)
 MS_RED     = (0.949, 0.545, 0.510, 1)
 MS_BADGE   = (0.949, 0.333, 0.333, 1)
+MS_BUB_OUT = (0.380, 0.270, 0.760, 1)
+MS_BUB_IN  = (0.165, 0.165, 0.210, 1)
 
 DATA_DIR     = os.path.join(os.path.expanduser("~"), ".moodsync")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -49,830 +53,912 @@ def load_account():
     except: pass
     return {}
 
-def save_account(username, fcm_token=""):
-    d = load_account()
-    d["username"] = username
-    if fcm_token: d["fcm_token"] = fcm_token
+def save_account(username, token=""):
+    d = load_account(); d["username"] = username
+    if token: d["fcm_token"] = token
     open(ACCOUNT_FILE, 'w').write(json.dumps(d))
 
-def save_fcm_token(token):
-    d = load_account()
-    d["fcm_token"] = token
+def save_token(token):
+    d = load_account(); d["fcm_token"] = token
     open(ACCOUNT_FILE, 'w').write(json.dumps(d))
 
 def clear_account():
     try: os.remove(ACCOUNT_FILE)
     except: pass
 
-def is_logged_in():
-    return bool(load_account().get("username"))
+def is_logged():  return bool(load_account().get("username"))
+def get_user():   return load_account().get("username", "")
+def get_token():  return load_account().get("fcm_token", "")
 
-def get_username():
-    return load_account().get("username", "")
+# === Android — chaque import dans son propre try/except ======================
 
-def get_fcm_token():
-    return load_account().get("fcm_token", "")
+_rut = None
+try:
+    from android.runnable import run_on_ui_thread as _rut
+except: pass
 
-# ── Android platform ──────────────────────────────────────────────────────────
+_jnius_ok = False
+try:
+    from jnius import autoclass, cast as jcast
+    _jnius_ok = True
+except: pass
 
-if platform == "android":
+_PA = _WV = _WVC = _WCC = _CM = _LP = _CJ = _Build = None
+if _jnius_ok:
+    for name, cls in [
+        ('_PA',    'org.kivy.android.PythonActivity'),
+        ('_WV',    'android.webkit.WebView'),
+        ('_WVC',   'android.webkit.WebViewClient'),
+        ('_WCC',   'android.webkit.WebChromeClient'),
+        ('_CM',    'android.webkit.CookieManager'),
+        ('_LP',    'android.view.ViewGroup$LayoutParams'),
+        ('_CJ',    'android.graphics.Color'),
+        ('_Build', 'android.os.Build'),
+    ]:
+        try: globals()[name] = autoclass(cls)
+        except: pass
+
+_NC = _NCH = _NM = _PI = _INT = _CTX = None
+_notif_ok = False
+if _jnius_ok:
+    for name, cls in [
+        ('_NC',  'androidx.core.app.NotificationCompat'),
+        ('_NCH', 'android.app.NotificationChannel'),
+        ('_NM',  'android.app.NotificationManager'),
+        ('_PI',  'android.app.PendingIntent'),
+        ('_INT', 'android.content.Intent'),
+        ('_CTX', 'android.content.Context'),
+    ]:
+        try: globals()[name] = autoclass(cls)
+        except: pass
+    _notif_ok = bool(_NC and _PI and _PA)
+
+CHANNEL_ID   = "moodsync_msg"
+CHANNEL_CALL = "moodsync_call"
+
+def create_channels():
+    if not _notif_ok: return
     try:
-        from android.runnable import run_on_ui_thread
-        from jnius import autoclass, PythonJavaClass, java_method
+        act = _PA.mActivity
+        if _Build and _Build.VERSION.SDK_INT >= 26:
+            nm = jcast("android.app.NotificationManager",
+                       act.getSystemService("notification"))
+            for cid, cname, imp in [
+                (CHANNEL_ID,   "MoodSync",       _NM.IMPORTANCE_HIGH),
+                (CHANNEL_CALL, "Appels MoodSync", _NM.IMPORTANCE_MAX),
+            ]:
+                ch = _NCH(cid, cname, imp)
+                ch.enableVibration(True)
+                nm.createNotificationChannel(ch)
+    except Exception as e: print("channels:", e)
 
-        PythonActivity  = autoclass("org.kivy.android.PythonActivity")
-        WebView         = autoclass("android.webkit.WebView")
-        WebViewClient   = autoclass("android.webkit.WebViewClient")
-        WebChromeClient = autoclass("android.webkit.WebChromeClient")
-        CookieManager   = autoclass("android.webkit.CookieManager")
-        LayoutParams    = autoclass("android.view.ViewGroup$LayoutParams")
-        Color_java      = autoclass("android.graphics.Color")
-        NotifManager    = autoclass("android.app.NotificationManager")
-        NotifCompat     = autoclass("androidx.core.app.NotificationCompat")
-        NotifChannel    = autoclass("android.app.NotificationChannel")
-        PendingIntent   = autoclass("android.app.PendingIntent")
-        Intent          = autoclass("android.content.Intent")
-        Context         = autoclass("android.content.Context")
-        Build           = autoclass("android.os.Build")
-        FirebaseMsg     = autoclass("com.google.firebase.messaging.FirebaseMessaging")
+def push_notif(title, body, nid=100, ch=None):
+    if not _notif_ok: return
+    try:
+        act   = _PA.mActivity
+        flags = _PI.FLAG_UPDATE_CURRENT
+        if _Build and _Build.VERSION.SDK_INT >= 23:
+            flags |= _PI.FLAG_IMMUTABLE
+        intent = _INT(act, _PA)
+        intent.setFlags(_INT.FLAG_ACTIVITY_SINGLE_TOP)
+        pi = _PI.getActivity(act, nid, intent, flags)
+        b  = _NC.Builder(act, ch or CHANNEL_ID)
+        b.setSmallIcon(act.getApplicationInfo().icon)
+        b.setContentTitle(title); b.setContentText(body)
+        b.setAutoCancel(True); b.setPriority(_NC.PRIORITY_HIGH)
+        b.setContentIntent(pi)
+        nm = jcast("android.app.NotificationManager",
+                   act.getSystemService("notification"))
+        nm.notify(nid, b.build())
+    except Exception as e: print("notif:", e)
 
-        CHANNEL_ID = "moodsync_channel"
+_Vib = _VibFX = None
+if _jnius_ok:
+    try: _Vib  = autoclass("android.os.Vibrator")
+    except: pass
+    try: _VibFX = autoclass("android.os.VibrationEffect")
+    except: pass
 
-        def create_notif_channel():
+def vibrate(ms=200):
+    if not _Vib or not _PA: return
+    try:
+        v = jcast("android.os.Vibrator",
+                  _PA.mActivity.getSystemService("vibrator"))
+        if _Build and _Build.VERSION.SDK_INT >= 26 and _VibFX:
+            v.vibrate(_VibFX.createOneShot(ms, -1))
+        else:
+            v.vibrate(ms)
+    except Exception as e: print("vibrate:", e)
+
+_RM = None
+if _jnius_ok:
+    try: _RM = autoclass("android.media.RingtoneManager")
+    except: pass
+
+def play_sound(ring=False):
+    if not _RM or not _PA: return
+    try:
+        act = _PA.mActivity
+        uri = _RM.getDefaultUri(_RM.TYPE_RINGTONE if ring else _RM.TYPE_NOTIFICATION)
+        _RM.getRingtone(act, uri).play()
+    except Exception as e: print("sound:", e)
+
+_FM = None
+if _jnius_ok:
+    try: _FM = autoclass("com.google.firebase.messaging.FirebaseMessaging")
+    except: pass
+
+def get_fcm_token_android(cb):
+    if not _FM:
+        Clock.schedule_once(lambda dt: cb(""), 0.1); return
+    try:
+        from jnius import PythonJavaClass, java_method
+        class L(PythonJavaClass):
+            __javainterfaces__ = ['com/google/android/gms/tasks/OnSuccessListener']
+            __javacontext__    = 'app'
+            @java_method('(Ljava/lang/Object;)V')
+            def onSuccess(self, result):
+                Clock.schedule_once(lambda dt: cb(str(result)), 0)
+        _FM.getInstance().getToken().addOnSuccessListener(L())
+    except Exception as e:
+        print("fcm_token:", e); Clock.schedule_once(lambda dt: cb(""), 0.1)
+
+def open_gallery(cb):
+    try:
+        from android import activity as act_mod
+        i = _INT(_INT.ACTION_PICK); i.setType("*/*")
+        class R:
+            def on_result(self, req, res, data):
+                if res == -1 and data:
+                    u = data.getData()
+                    if u: Clock.schedule_once(lambda dt: cb(str(u.toString())), 0)
+                act_mod.unbind(on_activity_result=self.on_result)
+        r = R(); act_mod.bind(on_activity_result=r.on_result)
+        _PA.mActivity.startActivityForResult(i, 42)
+    except Exception as e:
+        print("gallery:", e); cb(None)
+
+# === WebView ==================================================================
+
+_wv_ok = bool(_PA and _WV and _LP and _rut)
+
+if _wv_ok:
+    class _MSClient(_WVC):
+        def __init__(self, w):
+            super().__init__(); self._w = w
+        def onPageStarted(self, wv, url, fav):
+            self._w.current_url = url or ""
+            if self._w.on_url:
+                Clock.schedule_once(lambda dt, u=url: self._w.on_url(u or ""), 0)
+        def onPageFinished(self, wv, url):
+            self._w.current_url = url or ""
+            self._w.can_back = wv.canGoBack()
+            self._w.can_fwd  = wv.canGoForward()
+            t = wv.getTitle()
+            if t and self._w.on_title:
+                Clock.schedule_once(lambda dt, _t=str(t): self._w.on_title(_t), 0)
+            wv.evaluateJavascript(
+                "(function(){var m=document.querySelector('meta[name=\"username\"]');"
+                "if(m&&m.content){document.title='__U:'+m.content;return;}"
+                "var d=document.querySelector('[data-username]');"
+                "if(d)document.title='__U:'+d.getAttribute('data-username');})()", None)
+        def shouldOverrideUrlLoading(self, wv, url): return False
+
+
+class MSWebView(Widget):
+    current_url = StringProperty("")
+    can_back    = BooleanProperty(False)
+    can_fwd     = BooleanProperty(False)
+    on_title    = None
+    on_url      = None
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs); self._wv = None
+        if _wv_ok:
+            Clock.schedule_once(self._create, 0)
+            self.bind(pos=self._upd, size=self._upd)
+
+    def _create(self, *a):
+        if not _wv_ok: return
+        @_rut
+        def _do():
             try:
-                act = PythonActivity.mActivity
-                if Build.VERSION.SDK_INT >= 26:
-                    ch = NotifChannel(
-                        CHANNEL_ID, "MoodSync",
-                        NotifManager.IMPORTANCE_HIGH)
-                    ch.enableVibration(True)
-                    nm = act.getSystemService(Context.NOTIFICATION_SERVICE)
-                    nm = autoclass("android.app.NotificationManager").cast(nm) \
-                        if hasattr(autoclass("android.app.NotificationManager"), 'cast') \
-                        else nm
-                    try:
-                        from jnius import cast as jcast
-                        nm2 = jcast("android.app.NotificationManager", nm)
-                        nm2.createNotificationChannel(ch)
-                    except:
-                        pass
-            except Exception as e:
-                print("Channel error:", e)
-
-        def send_notif(title, body, nid=100):
-            try:
-                act = PythonActivity.mActivity
-                intent = Intent(act, PythonActivity)
-                intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                flags = PendingIntent.FLAG_UPDATE_CURRENT
-                if Build.VERSION.SDK_INT >= 23:
-                    flags |= PendingIntent.FLAG_IMMUTABLE
-                pi = PendingIntent.getActivity(act, nid, intent, flags)
-                b = NotifCompat.Builder(act, CHANNEL_ID)
-                b.setSmallIcon(act.getApplicationInfo().icon)
-                b.setContentTitle(title)
-                b.setContentText(body)
-                b.setAutoCancel(True)
-                b.setPriority(NotifCompat.PRIORITY_HIGH)
-                b.setContentIntent(pi)
-                try:
-                    from jnius import cast as jcast
-                    nm = jcast("android.app.NotificationManager",
-                               act.getSystemService(Context.NOTIFICATION_SERVICE))
-                    nm.notify(nid, b.build())
-                except:
-                    pass
-            except Exception as e:
-                print("Notif error:", e)
-
-        def get_fcm_token_android(cb):
-            try:
-                class Listener(PythonJavaClass):
-                    __javainterfaces__ = [
-                        'com/google/android/gms/tasks/OnSuccessListener']
-                    __javacontext__ = 'app'
-
-                    @java_method('(Ljava/lang/Object;)V')
-                    def onSuccess(self, result):
-                        Clock.schedule_once(
-                            lambda dt: cb(str(result)), 0)
-
-                FirebaseMsg.getInstance().getToken().addOnSuccessListener(
-                    Listener())
-            except Exception as e:
-                print("FCM token error:", e)
-                cb("")
-
-        class MSWebViewClient(WebViewClient):
-            def __init__(self, w):
-                super().__init__()
-                self._w = w
-
-            def onPageStarted(self, wv, url, fav):
-                self._w.current_url = url or ""
-                if self._w.on_url:
-                    Clock.schedule_once(
-                        lambda dt, u=url: self._w.on_url(u or ""), 0)
-
-            def onPageFinished(self, wv, url):
-                self._w.current_url = url or ""
-                self._w.can_back = wv.canGoBack()
-                self._w.can_fwd  = wv.canGoForward()
-                t = wv.getTitle()
-                if t and self._w.on_title:
-                    Clock.schedule_once(
-                        lambda dt, _t=str(t): self._w.on_title(_t), 0)
-                # Détecter user connecté
-                wv.evaluateJavascript(
-                    "(function(){"
-                    "var m=document.querySelector('meta[name=\"username\"]');"
-                    "if(m&&m.content){document.title='__USER__:'+m.content;return;}"
-                    "var d=document.querySelector('[data-username]');"
-                    "if(d){document.title='__USER__:'+d.getAttribute('data-username');}"
-                    "})()", None)
-
-            def shouldOverrideUrlLoading(self, wv, url):
-                return False
-
-        class AndroidWebView(Widget):
-            current_url = StringProperty("")
-            can_back    = BooleanProperty(False)
-            can_fwd     = BooleanProperty(False)
-            on_title    = None
-            on_url      = None
-
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                self._wv = None
-                Clock.schedule_once(self._create, 0)
-                self.bind(pos=self._update, size=self._update)
-
-            @run_on_ui_thread
-            def _create(self, *a):
-                act = PythonActivity.mActivity
-                cm  = CookieManager.getInstance()
-                cm.setAcceptCookie(True)
-
-                self._wv = WebView(act)
+                act = _PA.mActivity
+                _CM.getInstance().setAcceptCookie(True)
+                self._wv = _WV(act)
                 s = self._wv.getSettings()
-                s.setJavaScriptEnabled(True)
-                s.setDomStorageEnabled(True)
-                s.setLoadWithOverviewMode(True)
-                s.setUseWideViewPort(True)
-                s.setBuiltInZoomControls(False)
-                s.setDisplayZoomControls(False)
+                s.setJavaScriptEnabled(True); s.setDomStorageEnabled(True)
+                s.setLoadWithOverviewMode(True); s.setUseWideViewPort(True)
+                s.setBuiltInZoomControls(False); s.setDisplayZoomControls(False)
                 s.setMediaPlaybackRequiresUserGesture(False)
-                s.setMixedContentMode(0)
-                s.setAllowFileAccess(True)
-                ua = s.getUserAgentString()
-                s.setUserAgentString(ua + " MoodSyncApp/1.0")
+                s.setMixedContentMode(0); s.setAllowFileAccess(True)
+                s.setUserAgentString(s.getUserAgentString() + " MoodSyncApp/1.0")
+                self._wv.setWebViewClient(_MSClient(self))
+                self._wv.setWebChromeClient(_WCC())
+                if _CJ: self._wv.setBackgroundColor(_CJ.parseColor("#161619"))
+                act.addContentView(self._wv, _LP(_LP.MATCH_PARENT, _LP.MATCH_PARENT))
+                self._wv.loadUrl(HOME_URL if is_logged() else LOGIN_URL)
+                Clock.schedule_once(self._upd, 0.2)
+            except Exception as e: print("wv_create:", e)
+        _do()
 
-                self._wv.setWebViewClient(MSWebViewClient(self))
-                self._wv.setWebChromeClient(WebChromeClient())
-                self._wv.setBackgroundColor(Color_java.parseColor("#161619"))
-
-                act.addContentView(self._wv, LayoutParams(
-                    LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-
-                start_url = HOME_URL if is_logged_in() else LOGIN_URL
-                self._wv.loadUrl(start_url)
-                Clock.schedule_once(self._update, 0.2)
-
-            @run_on_ui_thread
-            def _update(self, *a):
-                if not self._wv: return
+    def _upd(self, *a):
+        if not self._wv: return
+        @_rut
+        def _do():
+            try:
                 from kivy.core.window import Window as W
                 self._wv.setX(int(self.x))
                 self._wv.setY(int(W.height - self.y - self.height))
                 lp = self._wv.getLayoutParams()
-                lp.width  = int(self.width)
-                lp.height = int(self.height)
-                self._wv.setLayoutParams(lp)
-                self._wv.requestLayout()
+                lp.width = int(self.width); lp.height = int(self.height)
+                self._wv.setLayoutParams(lp); self._wv.requestLayout()
+            except Exception as e: print("wv_upd:", e)
+        _do()
 
-            @run_on_ui_thread
-            def load(self, url):
-                if self._wv: self._wv.loadUrl(url)
+    def load(self, url):
+        if not self._wv: return
+        @_rut
+        def _do():
+            try: self._wv.loadUrl(url)
+            except: pass
+        _do()
 
-            @run_on_ui_thread
-            def run_js(self, js):
-                if self._wv:
-                    self._wv.evaluateJavascript(js, None)
+    def run_js(self, js):
+        if not self._wv: return
+        @_rut
+        def _do():
+            try: self._wv.evaluateJavascript(js, None)
+            except: pass
+        _do()
 
-            @run_on_ui_thread
-            def back(self):
-                if self._wv and self._wv.canGoBack():
-                    self._wv.goBack()
+    def back(self):
+        if not self._wv: return
+        @_rut
+        def _do():
+            try:
+                if self._wv.canGoBack(): self._wv.goBack()
+            except: pass
+        _do()
 
-            @run_on_ui_thread
-            def reload(self):
-                if self._wv: self._wv.reload()
+    def reload(self):
+        if not self._wv: return
+        @_rut
+        def _do():
+            try: self._wv.reload()
+            except: pass
+        _do()
 
-            @run_on_ui_thread
-            def clear_cookies(self):
-                cm = CookieManager.getInstance()
-                cm.removeAllCookies(None)
-                cm.flush()
+    def clear_cookies(self):
+        @_rut
+        def _do():
+            try:
+                cm = _CM.getInstance()
+                cm.removeAllCookies(None); cm.flush()
+            except: pass
+        _do()
 
-        ANDROID_OK = True
-
-    except Exception as e:
-        print("Android init error:", e)
-        ANDROID_OK = False
-
-        def create_notif_channel(): pass
-        def send_notif(t, b, nid=100): pass
-        def get_fcm_token_android(cb): Clock.schedule_once(lambda dt: cb(""), 0.1)
-
-        class AndroidWebView(Widget):
-            current_url = StringProperty("")
-            can_back    = BooleanProperty(False)
-            can_fwd     = BooleanProperty(False)
-            on_title    = None
-            on_url      = None
-            def load(self, url): pass
-            def run_js(self, js): pass
-            def back(self): pass
-            def reload(self): pass
-            def clear_cookies(self): pass
-
-else:
-    ANDROID_OK = False
-    def create_notif_channel(): pass
-    def send_notif(t, b, nid=100): print(f"NOTIF: {t} — {b}")
-    def get_fcm_token_android(cb): Clock.schedule_once(lambda dt: cb(""), 0.1)
-
-    class AndroidWebView(Widget):
-        current_url = StringProperty("")
-        can_back    = BooleanProperty(False)
-        can_fwd     = BooleanProperty(False)
-        on_title    = None
-        on_url      = None
-        def load(self, url): pass
-        def run_js(self, js): pass
-        def back(self): pass
-        def reload(self): pass
-        def clear_cookies(self): pass
-
-# ── Badge ─────────────────────────────────────────────────────────────────────
+# === Badge ====================================================================
 
 class Badge(Widget):
     count = NumericProperty(0)
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.size_hint = (None, None)
-        self.size = (dp(16), dp(16))
-        self.bind(count=self._draw, pos=self._draw, size=self._draw)
-
-    def _draw(self, *a):
+    def __init__(self, **kw):
+        super().__init__(**kw); self.size_hint=(None,None); self.size=(dp(16),dp(16))
+        self.bind(count=self._d, pos=self._d, size=self._d)
+    def _d(self, *a):
         self.canvas.clear()
-        if self.count <= 0:
-            return
+        if self.count <= 0: return
         with self.canvas:
-            Color(*MS_BADGE)
-            Ellipse(pos=self.pos, size=self.size)
-        n = str(min(self.count, 99))
-        lbl = Label(text=n, font_size=sp(8), color=(1,1,1,1),
-                    size=self.size, pos=self.pos,
-                    halign='center', valign='middle')
-        lbl.texture_update()
-        if lbl.texture:
+            Color(*MS_BADGE); Ellipse(pos=self.pos, size=self.size)
+        l=Label(text=str(min(self.count,99)), font_size=sp(8), color=(1,1,1,1),
+                size=self.size, pos=self.pos, halign='center', valign='middle')
+        l.texture_update()
+        if l.texture:
             with self.canvas:
                 Color(1,1,1,1)
-                Rectangle(
-                    texture=lbl.texture,
-                    pos=(self.x + (self.width  - lbl.texture.width)  / 2,
-                         self.y + (self.height - lbl.texture.height) / 2),
-                    size=lbl.texture.size)
+                Rectangle(texture=l.texture,
+                    pos=(self.x+(self.width-l.texture.width)/2,
+                         self.y+(self.height-l.texture.height)/2),
+                    size=l.texture.size)
 
-# ── NavItem ───────────────────────────────────────────────────────────────────
+# === NavItem ==================================================================
 
 class NavItem(FloatLayout):
-    def __init__(self, icon_text, label_text, callback,
-                 has_badge=False, **kwargs):
-        super().__init__(**kwargs)
-        self._cb = callback
-
-        inner = BoxLayout(
-            orientation='vertical',
-            padding=[0, dp(5), 0, dp(3)],
-            spacing=dp(2),
-            size_hint=(1, 1),
-        )
-        self._icon = Label(
-            text=icon_text, font_size=sp(20),
-            color=MS_DIM,
-            size_hint_y=None, height=dp(26),
-            halign='center',
-        )
-        self._lbl = Label(
-            text=label_text, font_size=sp(10),
-            color=MS_DIM,
-            size_hint_y=None, height=dp(14),
-            halign='center',
-        )
-        inner.add_widget(self._icon)
-        inner.add_widget(self._lbl)
-        self.add_widget(inner)
-
-        if has_badge:
-            self.badge = Badge()
-            self.badge.pos_hint = {'center_x': 0.65, 'center_y': 0.72}
+    def __init__(self, icon, label, cb, badge=False, **kw):
+        super().__init__(**kw); self._cb=cb
+        box=BoxLayout(orientation='vertical',padding=[0,dp(5),0,dp(3)],
+                      spacing=dp(2),size_hint=(1,1))
+        self._ic=Label(text=icon,font_size=sp(20),color=MS_DIM,
+                       size_hint_y=None,height=dp(26),halign='center')
+        self._lb=Label(text=label,font_size=sp(10),color=MS_DIM,
+                       size_hint_y=None,height=dp(14),halign='center')
+        box.add_widget(self._ic); box.add_widget(self._lb); self.add_widget(box)
+        if badge:
+            self.badge=Badge(); self.badge.pos_hint={'center_x':.65,'center_y':.72}
             self.add_widget(self.badge)
-        else:
-            self.badge = None
-
-    def set_active(self, v):
-        c = MS_ACCENT2 if v else MS_DIM
-        self._icon.color = c
-        self._lbl.color  = c
-
-    def on_touch_up(self, touch):
+        else: self.badge=None
+    def set_active(self,v):
+        c=MS_ACCENT2 if v else MS_DIM; self._ic.color=c; self._lb.color=c
+    def on_touch_up(self,touch):
         if self.collide_point(*touch.pos):
             if self._cb: self._cb()
             return True
         return super().on_touch_up(touch)
 
-# ── Bottom Nav ────────────────────────────────────────────────────────────────
+# === BottomNav ================================================================
 
 class BottomNav(BoxLayout):
-    def __init__(self, app, **kwargs):
-        super().__init__(orientation='horizontal', **kwargs)
-        self.app     = app
-        self.size_hint_y = None
-        self.height  = dp(60)
-        self._items  = {}
-        self._active = 'home'
-        self._build()
-
+    def __init__(self,app,**kw):
+        super().__init__(orientation='horizontal',**kw)
+        self.app=app; self.size_hint_y=None; self.height=dp(60)
+        self._items={}; self._active='home'; self._build()
     def _build(self):
         with self.canvas.before:
-            Color(*MS_NAVBAR)
-            self._bg = Rectangle(pos=self.pos, size=self.size)
-        self.bind(
-            pos =lambda *a: setattr(self._bg, 'pos',  self.pos),
-            size=lambda *a: setattr(self._bg, 'size', self.size),
-        )
-        tabs = [
-            ('home',    'Accueil',  HOME_URL,    False),
-            ('chat',    'Messages', CHAT_URL,    True),
-            ('notifs',  'Notifs',   NOTIF_URL,   True),
-            ('profile', 'Profil',   PROFILE_URL, False),
-        ]
-        icons = {
-            'home':    'o',
-            'chat':    'M',
-            'notifs':  'N',
-            'profile': 'P',
-        }
-        for key, label, url, badge in tabs:
-            item = NavItem(
-                icons[key], label,
-                callback=lambda k=key, u=url: self._tap(k, u),
-                has_badge=badge,
-                size_hint=(1, 1),
-            )
-            if key == self._active:
-                item.set_active(True)
-            self._items[key] = item
-            self.add_widget(item)
+            Color(*MS_NAVBAR); self._bg=Rectangle(pos=self.pos,size=self.size)
+        self.bind(pos=lambda *a:setattr(self._bg,'pos',self.pos),
+                  size=lambda *a:setattr(self._bg,'size',self.size))
+        for key,label,url,bdg in [
+            ('home','Accueil',HOME_URL,False),
+            ('chat','Messages',CHAT_URL,True),
+            ('notifs','Notifs',NOTIF_URL,True),
+            ('profile','Profil',PROFILE_URL,False),
+        ]:
+            icons={'home':'o','chat':'M','notifs':'N','profile':'P'}
+            item=NavItem(icons[key],label,
+                         cb=lambda k=key,u=url:self._tap(k,u),
+                         badge=bdg,size_hint=(1,1))
+            if key=='home': item.set_active(True)
+            self._items[key]=item; self.add_widget(item)
+    def _tap(self,key,url):
+        self._active=key
+        for k,i in self._items.items(): i.set_active(k==key)
+        if key=='chat': self.app.show_compose()
+        elif not is_logged(): self.app.webview.load(LOGIN_URL)
+        else: self.app.webview.load(url)
+        if key in ('chat','notifs'): self.set_badge(key,0)
+    def set_by_url(self,url):
+        k=None
+        if '/chat' in url: k='chat'
+        elif '/notification' in url: k='notifs'
+        elif '/profile' in url: k='profile'
+        elif url.rstrip('/')==HOME_URL.rstrip('/'): k='home'
+        if k:
+            self._active=k
+            for ki,i in self._items.items(): i.set_active(ki==k)
+    def set_badge(self,key,n):
+        i=self._items.get(key)
+        if i and i.badge: i.badge.count=n
 
-    def _tap(self, key, url):
-        self._active = key
-        for k, item in self._items.items():
-            item.set_active(k == key)
-        if not is_logged_in():
-            self.app.webview.load(LOGIN_URL)
-        else:
-            self.app.webview.load(url)
-        if key in ('chat', 'notifs'):
-            self.set_badge(key, 0)
-
-    def set_active_by_url(self, url):
-        key = None
-        if '/chat' in url:         key = 'chat'
-        elif '/notification' in url: key = 'notifs'
-        elif '/profile' in url:    key = 'profile'
-        elif url.rstrip('/') == HOME_URL.rstrip('/'): key = 'home'
-        if key:
-            self._active = key
-            for k, item in self._items.items():
-                item.set_active(k == key)
-
-    def set_badge(self, key, n):
-        item = self._items.get(key)
-        if item and item.badge:
-            item.badge.count = n
-
-# ── Toolbar ───────────────────────────────────────────────────────────────────
+# === Toolbar ==================================================================
 
 class Toolbar(BoxLayout):
-    def __init__(self, app, **kwargs):
-        super().__init__(orientation='horizontal', **kwargs)
-        self.app = app
-        self.size_hint_y = None
-        self.height = dp(54)
-        self._build()
-
+    def __init__(self,app,**kw):
+        super().__init__(orientation='horizontal',**kw)
+        self.app=app; self.size_hint_y=None; self.height=dp(54); self._build()
     def _build(self):
         with self.canvas.before:
-            Color(*MS_TOOL)
-            self._bg = Rectangle(pos=self.pos, size=self.size)
-        self.bind(
-            pos =lambda *a: setattr(self._bg, 'pos',  self.pos),
-            size=lambda *a: setattr(self._bg, 'size', self.size),
-        )
-        inner = BoxLayout(
-            padding=[dp(10), dp(8), dp(10), dp(8)],
-            spacing=dp(8),
-        )
-        self.btn_back = Button(
-            text='<', font_size=sp(20), bold=True,
-            size_hint=(None, None), size=(dp(40), dp(38)),
-            background_normal='', background_color=(0,0,0,0),
-            color=MS_DIM,
-        )
-        self.btn_back.bind(on_press=lambda *a: self.app.go_back())
-
-        self.title_lbl = Label(
-            text='MoodSync', font_size=sp(16), bold=True,
-            color=MS_TEXT, size_hint_x=1,
-            halign='left', valign='middle',
-        )
-        self.title_lbl.bind(size=self.title_lbl.setter('text_size'))
-
-        self.btn_rel = Button(
-            text='R', font_size=sp(16), bold=True,
-            size_hint=(None, None), size=(dp(40), dp(38)),
-            background_normal='', background_color=(0,0,0,0),
-            color=MS_DIM,
-        )
-        self.btn_rel.bind(on_press=lambda *a: self.app.reload_page())
-
-        self.av_btn = Button(
-            text='?', font_size=sp(13), bold=True,
-            size_hint=(None, None), size=(dp(34), dp(34)),
-            background_normal='', background_color=MS_DIM,
-            color=(1,1,1,1),
-        )
-        self.av_btn.bind(on_press=lambda *a: self.app.toggle_account())
-
-        inner.add_widget(self.btn_back)
-        inner.add_widget(self.title_lbl)
-        inner.add_widget(self.btn_rel)
-        inner.add_widget(self.av_btn)
+            Color(*MS_TOOL); self._bg=Rectangle(pos=self.pos,size=self.size)
+        self.bind(pos=lambda *a:setattr(self._bg,'pos',self.pos),
+                  size=lambda *a:setattr(self._bg,'size',self.size))
+        inner=BoxLayout(padding=[dp(10),dp(8),dp(10),dp(8)],spacing=dp(8))
+        self.btn_back=Button(text='<',font_size=sp(20),bold=True,
+            size_hint=(None,None),size=(dp(40),dp(38)),
+            background_normal='',background_color=(0,0,0,0),color=MS_DIM)
+        self.btn_back.bind(on_press=lambda *a:self.app.go_back())
+        self.title=Label(text='MoodSync',font_size=sp(16),bold=True,
+            color=MS_TEXT,size_hint_x=1,halign='left',valign='middle')
+        self.title.bind(size=self.title.setter('text_size'))
+        self.typing=Label(text='',font_size=sp(11),color=MS_ACCENT2,
+            size_hint=(None,None),size=(dp(100),dp(20)))
+        self.btn_r=Button(text='R',font_size=sp(16),bold=True,
+            size_hint=(None,None),size=(dp(38),dp(38)),
+            background_normal='',background_color=(0,0,0,0),color=MS_DIM)
+        self.btn_r.bind(on_press=lambda *a:self.app.reload_page())
+        self.av=Button(text='?',font_size=sp(13),bold=True,
+            size_hint=(None,None),size=(dp(34),dp(34)),
+            background_normal='',background_color=MS_DIM,color=(1,1,1,1))
+        self.av.bind(on_press=lambda *a:self.app.toggle_account())
+        for w in (self.btn_back,self.title,self.typing,self.btn_r,self.av):
+            inner.add_widget(w)
         self.add_widget(inner)
-
-    def set_title(self, t):
-        self.title_lbl.text = t[:26] + ('...' if len(t)>26 else '')
-
-    def set_back(self, v):
-        self.btn_back.color = MS_TEXT if v else MS_DIM
-
+    def set_title(self,t): self.title.text=t[:26]+('...' if len(t)>26 else '')
+    def set_back(self,v): self.btn_back.color=MS_TEXT if v else MS_DIM
+    def show_typing(self,name):
+        self.typing.text=name+' ecrit...'
+        Clock.unschedule(self._ct); Clock.schedule_once(self._ct,3)
+    def _ct(self,*a): self.typing.text=''
     def update_av(self):
-        u = get_username()
+        u=get_user()
         if u:
-            parts = u.strip().split()
-            init  = (parts[0][0] + (parts[-1][0] if len(parts)>1 else '')).upper()
-            self.av_btn.text             = init
-            self.av_btn.background_color = MS_ACCENT
-        else:
-            self.av_btn.text             = '?'
-            self.av_btn.background_color = MS_DIM
+            p=u.strip().split()
+            self.av.text=(p[0][0]+(p[-1][0] if len(p)>1 else '')).upper()
+            self.av.background_color=MS_ACCENT
+        else: self.av.text='?'; self.av.background_color=MS_DIM
 
-# ── Account panel ─────────────────────────────────────────────────────────────
+# === ComposePage ==============================================================
 
-class AccountPanel(FloatLayout):
-    def __init__(self, app, **kwargs):
-        super().__init__(**kwargs)
-        self.app      = app
-        self._visible = False
-        self.opacity  = 0
-        self.size_hint = (None, None)
-        self.size = (dp(240), dp(240))
-        self._build()
-
+class ComposePage(FloatLayout):
+    def __init__(self,app,**kw):
+        super().__init__(**kw)
+        self.app=app; self._cid=None; self._cname=''
+        self._vis=False; self.opacity=0; self._build()
     def _build(self):
         with self.canvas.before:
-            Color(0.13, 0.13, 0.17, 0.97)
-            self._bg = RoundedRectangle(
-                pos=self.pos, size=self.size, radius=[dp(14)])
-        self.bind(pos =lambda *a: setattr(self._bg,'pos', self.pos),
-                  size=lambda *a: setattr(self._bg,'size',self.size))
-
-        lay = BoxLayout(orientation='vertical',
-                        padding=dp(16), spacing=dp(10),
-                        size_hint=(1,1))
-
-        self._user_lbl = Label(
-            text='Non connecte', font_size=sp(13),
-            color=MS_DIM, size_hint_y=None, height=dp(22),
-            halign='center')
-        lay.add_widget(self._user_lbl)
-
-        self._btn_login = self._btn('Se connecter', MS_ACCENT,
-                                    self.app.do_login)
-        self._btn_profile = self._btn('Mon profil', (0.15,0.15,0.2,1),
-                                       self.app.open_profile)
-        self._btn_logout  = self._btn('Deconnexion', (0.3,0.1,0.1,1),
-                                       self.app.do_logout)
-        self._btn_profile.opacity = 0; self._btn_profile.disabled = True
-        self._btn_logout.opacity  = 0; self._btn_logout.disabled  = True
-
-        btn_close = Button(
-            text='Fermer', size_hint_y=None, height=dp(34),
-            background_normal='', background_color=(0,0,0,0),
-            color=MS_DIM, font_size=sp(12))
-        btn_close.bind(on_press=lambda *a: self.hide())
-
-        for w in (self._user_lbl, self._btn_login,
-                  self._btn_profile, self._btn_logout,
-                  btn_close, Widget()):
-            lay.add_widget(w)
-        self.add_widget(lay)
-
-    def _btn(self, txt, col, fn):
-        b = Button(text=txt, size_hint_y=None, height=dp(40),
-                   background_normal='', background_color=col,
-                   color=(1,1,1,1), font_size=sp(13))
-        b.bind(on_press=lambda *a: (fn(), self.hide()))
-        return b
-
-    def refresh(self):
-        if is_logged_in():
-            self._user_lbl.text           = get_username()
-            self._user_lbl.color          = MS_TEXT
-            self._btn_login.opacity       = 0
-            self._btn_login.disabled      = True
-            self._btn_profile.opacity     = 1
-            self._btn_profile.disabled    = False
-            self._btn_logout.opacity      = 1
-            self._btn_logout.disabled     = False
-        else:
-            self._user_lbl.text           = 'Non connecte'
-            self._user_lbl.color          = MS_DIM
-            self._btn_login.opacity       = 1
-            self._btn_login.disabled      = False
-            self._btn_profile.opacity     = 0
-            self._btn_profile.disabled    = True
-            self._btn_logout.opacity      = 0
-            self._btn_logout.disabled     = True
+            Color(*MS_BG); self._bg=Rectangle(pos=self.pos,size=self.size)
+        self.bind(pos=lambda *a:setattr(self._bg,'pos',self.pos),
+                  size=lambda *a:setattr(self._bg,'size',self.size))
+        main=BoxLayout(orientation='vertical',size_hint=(1,1))
+        # header
+        hdr=BoxLayout(size_hint_y=None,height=dp(54),
+                      padding=[dp(8),dp(8)],spacing=dp(8))
+        with hdr.canvas.before:
+            Color(*MS_TOOL); self._hbg=Rectangle(pos=hdr.pos,size=hdr.size)
+        hdr.bind(pos=lambda *a:setattr(self._hbg,'pos',hdr.pos),
+                 size=lambda *a:setattr(self._hbg,'size',hdr.size))
+        bx=Button(text='X',font_size=sp(16),bold=True,
+            size_hint=(None,None),size=(dp(38),dp(38)),
+            background_normal='',background_color=(0,0,0,0),color=MS_DIM)
+        bx.bind(on_press=lambda *a:self.hide())
+        self._ht=Label(text='Messages',font_size=sp(15),bold=True,
+            color=MS_TEXT,size_hint_x=1,halign='left',valign='middle')
+        self._ht.bind(size=self._ht.setter('text_size'))
+        self._ty=Label(text='',font_size=sp(11),color=MS_ACCENT2,
+            size_hint=(None,None),size=(dp(120),dp(20)))
+        hdr.add_widget(bx); hdr.add_widget(self._ht); hdr.add_widget(self._ty)
+        main.add_widget(hdr)
+        # conversations
+        self._cvbox=BoxLayout(orientation='vertical',size_hint_y=None,
+                              spacing=dp(2),padding=[dp(6),dp(6)])
+        self._cvbox.bind(minimum_height=self._cvbox.setter('height'))
+        self._cvscroll=ScrollView(size_hint=(1,1))
+        self._cvscroll.add_widget(self._cvbox)
+        main.add_widget(self._cvscroll)
+        # messages
+        self._mbox=BoxLayout(orientation='vertical',size_hint_y=None,
+                             spacing=dp(4),padding=[dp(8),dp(8)])
+        self._mbox.bind(minimum_height=self._mbox.setter('height'))
+        self._mscroll=ScrollView(size_hint=(1,1))
+        self._mscroll.add_widget(self._mbox)
+        self._mscroll.opacity=0
+        main.add_widget(self._mscroll)
+        # input
+        ibar=BoxLayout(size_hint_y=None,height=dp(58),
+                       padding=[dp(8),dp(6)],spacing=dp(6))
+        with ibar.canvas.before:
+            Color(0.08,0.08,0.11,1); self._ibg=Rectangle(pos=ibar.pos,size=ibar.size)
+        ibar.bind(pos=lambda *a:setattr(self._ibg,'pos',ibar.pos),
+                  size=lambda *a:setattr(self._ibg,'size',ibar.size))
+        bimg=Button(text='IMG',font_size=sp(11),bold=True,
+            size_hint=(None,None),size=(dp(42),dp(42)),
+            background_normal='',background_color=MS_SURFACE,color=MS_TEXT)
+        bimg.bind(on_press=lambda *a:self._pick_file())
+        self._inp=TextInput(hint_text='Ecrire...',hint_text_color=MS_DIM,
+            foreground_color=MS_TEXT,background_color=(0.12,0.12,0.16,1),
+            cursor_color=MS_ACCENT,font_size=sp(14),
+            size_hint=(1,None),height=dp(42),multiline=False,
+            padding=[dp(10),dp(10)])
+        self._inp.bind(on_text_validate=lambda *a:self._send())
+        bsend=Button(text='>',font_size=sp(18),bold=True,
+            size_hint=(None,None),size=(dp(42),dp(42)),
+            background_normal='',background_color=MS_ACCENT,color=(1,1,1,1))
+        bsend.bind(on_press=lambda *a:self._send())
+        ibar.add_widget(bimg); ibar.add_widget(self._inp); ibar.add_widget(bsend)
+        main.add_widget(ibar)
+        self.add_widget(main)
 
     def show(self):
-        self.refresh()
-        self._visible = True
-        self.opacity  = 1
-
+        self._vis=True; self.opacity=1
+        self._cid=None; self._ht.text='Messages'
+        self._cvscroll.opacity=1; self._mscroll.opacity=0
+        self._load_convs()
     def hide(self):
-        self._visible = False
-        self.opacity  = 0
+        self._vis=False; self.opacity=0; Clock.unschedule(self._poll)
+    def show_typing(self,name):
+        self._ty.text=name+' ecrit...'
+        Clock.schedule_once(lambda dt:setattr(self._ty,'text',''),3)
 
+    def _load_convs(self):
+        self._cvbox.clear_widgets()
+        self._cvbox.add_widget(Label(text='Chargement...',color=MS_DIM,
+            font_size=sp(13),size_hint_y=None,height=dp(40)))
+        def _f():
+            import urllib.request
+            try:
+                r=urllib.request.urlopen(API_CONVS,timeout=6)
+                d=json.loads(r.read().decode())
+                Clock.schedule_once(lambda dt:self._show_convs(d),0)
+            except Exception as e:
+                Clock.schedule_once(lambda dt:self._show_convs({'error':str(e)}),0)
+        threading.Thread(target=_f,daemon=True).start()
+
+    def _show_convs(self,data):
+        self._cvbox.clear_widgets()
+        if 'error' in data:
+            self._cvbox.add_widget(Label(text='Erreur: '+data['error'],
+                color=MS_RED,font_size=sp(12),size_hint_y=None,height=dp(40)))
+            return
+        convs=data.get('conversations',[])
+        if not convs:
+            self._cvbox.add_widget(Label(text='Aucune conversation',
+                color=MS_DIM,font_size=sp(13),size_hint_y=None,height=dp(40)))
+            return
+        for c in convs: self._add_row(c)
+
+    def _add_row(self,c):
+        cid=c.get('chat_id'); cname=c.get('username',''); prev=c.get('last_message','')
+        row=BoxLayout(size_hint_y=None,height=dp(64),padding=[dp(12),dp(8)],spacing=dp(10))
+        def _upd(*a):
+            row.canvas.before.clear()
+            with row.canvas.before:
+                Color(*MS_SURFACE)
+                RoundedRectangle(pos=row.pos,size=row.size,radius=[dp(10)])
+        _upd(); row.bind(pos=_upd,size=_upd)
+        av=Widget(size_hint=(None,None),size=(dp(40),dp(40)))
+        def _dav(*a):
+            av.canvas.clear()
+            with av.canvas:
+                Color(*MS_ACCENT); Ellipse(pos=av.pos,size=av.size)
+            l=Label(text=cname[:1].upper() if cname else '?',
+                    font_size=sp(16),bold=True,color=(1,1,1,1),
+                    size=av.size,pos=av.pos,halign='center',valign='middle')
+            l.texture_update()
+            if l.texture:
+                with av.canvas:
+                    Color(1,1,1,1)
+                    Rectangle(texture=l.texture,
+                        pos=(av.x+(av.width-l.texture.width)/2,
+                             av.y+(av.height-l.texture.height)/2),
+                        size=l.texture.size)
+        av.bind(pos=_dav,size=_dav)
+        info=BoxLayout(orientation='vertical',size_hint_x=1)
+        nl=Label(text=cname,font_size=sp(14),bold=True,color=MS_TEXT,
+                 halign='left',valign='middle',size_hint_y=None,height=dp(22))
+        nl.bind(size=nl.setter('text_size'))
+        pl=Label(text=prev[:40]+('...' if len(prev)>40 else ''),
+                 font_size=sp(11),color=MS_DIM,
+                 halign='left',valign='middle',size_hint_y=None,height=dp(18))
+        pl.bind(size=pl.setter('text_size'))
+        info.add_widget(nl); info.add_widget(pl)
+        row.add_widget(av); row.add_widget(info)
+        row.bind(on_touch_up=lambda w,t,ci=cid,cn=cname:
+                 self._open_conv(ci,cn) if w.collide_point(*t.pos) else None)
+        self._cvbox.add_widget(row)
+
+    def _open_conv(self,cid,cname):
+        self._cid=cid; self._cname=cname
+        self._ht.text=cname
+        self._cvscroll.opacity=0; self._mscroll.opacity=1
+        self._mbox.clear_widgets(); self._load_msgs()
+        Clock.schedule_interval(self._poll,4)
+
+    def _load_msgs(self):
+        if not self._cid: return
+        def _f():
+            import urllib.request
+            try:
+                r=urllib.request.urlopen(
+                    f"{HOME_URL}/api/messages.php?chat_id={self._cid}&limit=30",
+                    timeout=6)
+                d=json.loads(r.read().decode())
+                Clock.schedule_once(lambda dt:self._show_msgs(d),0)
+            except: pass
+        threading.Thread(target=_f,daemon=True).start()
+
+    def _show_msgs(self,data):
+        self._mbox.clear_widgets(); me=get_user()
+        for m in data.get('messages',[]):
+            txt=m.get('message','')
+            if txt: self._add_bubble(txt, m.get('username')==me)
+        Clock.schedule_once(lambda dt:setattr(self._mscroll,'scroll_y',0),0.1)
+
+    def _add_bubble(self,text,mine):
+        lbl=Label(text=text,font_size=sp(13),color=MS_TEXT,
+                  size_hint_y=None,halign='right' if mine else 'left',valign='middle')
+        lbl.text_size=(Window.width*.65,None); lbl.texture_update()
+        lbl.height=lbl.texture_size[1]+dp(20)
+        row=BoxLayout(size_hint_y=None,height=lbl.height+dp(10),padding=[dp(6),dp(2)])
+        def _upd(*a):
+            row.canvas.before.clear()
+            with row.canvas.before:
+                Color(*(MS_BUB_OUT if mine else MS_BUB_IN))
+                RoundedRectangle(pos=row.pos,size=row.size,radius=[dp(12)])
+        _upd(); row.bind(pos=_upd,size=_upd)
+        if mine: row.add_widget(Widget()); row.add_widget(lbl)
+        else:    row.add_widget(lbl);     row.add_widget(Widget())
+        self._mbox.add_widget(row)
+
+    def _poll(self,dt):
+        if not self._vis or not self._cid: Clock.unschedule(self._poll); return
+        self._load_msgs()
+
+    def _send(self):
+        txt=self._inp.text.strip()
+        if not txt or not self._cid: return
+        self._inp.text=''
+        self._add_bubble(txt,True)
+        Clock.schedule_once(lambda dt:setattr(self._mscroll,'scroll_y',0),0.1)
+        def _f():
+            import urllib.request,urllib.parse
+            try:
+                urllib.request.urlopen(API_SEND,
+                    urllib.parse.urlencode({'chat_id':self._cid,'message':txt}).encode(),
+                    timeout=5)
+            except Exception as e: print("send:",e)
+        threading.Thread(target=_f,daemon=True).start()
+
+    def _pick_file(self):
+        try: open_gallery(self._on_file)
+        except: pass
+    def _on_file(self,uri):
+        if not uri or not self._cid: return
+        self.app.webview.load(f"{CHAT_URL}?chat_id={self._cid}"); self.hide()
+
+# === CallOverlay ==============================================================
+
+class CallOverlay(FloatLayout):
+    def __init__(self,app,**kw):
+        super().__init__(**kw); self.app=app; self._vis=False; self.opacity=0; self._build()
+    def _build(self):
+        with self.canvas.before:
+            Color(0,0,0,.88); self._bg=Rectangle(pos=self.pos,size=self.size)
+        self.bind(pos=lambda *a:setattr(self._bg,'pos',self.pos),
+                  size=lambda *a:setattr(self._bg,'size',self.size))
+        panel=BoxLayout(orientation='vertical',
+            size_hint=(None,None),size=(dp(270),dp(280)),
+            pos_hint={'center_x':.5,'center_y':.55},spacing=dp(12),padding=dp(20))
+        with panel.canvas.before:
+            Color(0.12,0.12,0.17,1)
+            self._pbg=RoundedRectangle(pos=panel.pos,size=panel.size,radius=[dp(18)])
+        panel.bind(pos=lambda *a:setattr(self._pbg,'pos',panel.pos),
+                   size=lambda *a:setattr(self._pbg,'size',panel.size))
+        self._av=Label(text='?',font_size=sp(34),color=(1,1,1,1),
+                       size_hint_y=None,height=dp(56),halign='center')
+        self._nm=Label(text='Appel entrant',font_size=sp(17),bold=True,
+                       color=MS_TEXT,size_hint_y=None,height=dp(28),halign='center')
+        self._kd=Label(text='Audio',font_size=sp(12),color=MS_DIM,
+                       size_hint_y=None,height=dp(20),halign='center')
+        btns=BoxLayout(size_hint_y=None,height=dp(62),spacing=dp(36),padding=[dp(26),0])
+        bno=Button(text='X',size_hint=(None,None),size=(dp(56),dp(56)),
+                   background_normal='',background_color=MS_RED,
+                   font_size=sp(20),color=(1,1,1,1),bold=True)
+        byes=Button(text='OK',size_hint=(None,None),size=(dp(56),dp(56)),
+                    background_normal='',background_color=MS_GREEN,
+                    font_size=sp(14),color=(1,1,1,1),bold=True)
+        bno.bind(on_press=lambda *a:self.decline())
+        byes.bind(on_press=lambda *a:self.accept())
+        btns.add_widget(bno); btns.add_widget(byes)
+        for w in (self._av,self._nm,self._kd,btns): panel.add_widget(w)
+        self.add_widget(panel); self._url=''
+    def show(self,caller,kind='audio',url=''):
+        self._url=url; self._vis=True; self.opacity=1
+        self._av.text=caller[:1].upper() if caller else '?'
+        self._nm.text=caller; self._kd.text='Video' if kind=='video' else 'Audio'
+        push_notif(f'Appel de {caller}','Repondre',102,CHANNEL_CALL)
+        play_sound(ring=True); vibrate(600)
+    def accept(self):
+        self._vis=False; self.opacity=0
+        if self._url: self.app.webview.load(self._url)
+    def decline(self):
+        self._vis=False; self.opacity=0
+        self.app.webview.run_js("if(window.__activePeerCall)window.__activePeerCall.close();")
+
+# === AccountPanel =============================================================
+
+class AccountPanel(FloatLayout):
+    def __init__(self,app,**kw):
+        super().__init__(**kw); self.app=app; self._vis=False; self.opacity=0
+        self.size_hint=(None,None); self.size=(dp(230),dp(220)); self._build()
+    def _build(self):
+        with self.canvas.before:
+            Color(0.13,0.13,0.17,.97)
+            self._bg=RoundedRectangle(pos=self.pos,size=self.size,radius=[dp(14)])
+        self.bind(pos=lambda *a:setattr(self._bg,'pos',self.pos),
+                  size=lambda *a:setattr(self._bg,'size',self.size))
+        lay=BoxLayout(orientation='vertical',padding=dp(14),spacing=dp(8),size_hint=(1,1))
+        self._ul=Label(text='Non connecte',font_size=sp(13),color=MS_DIM,
+                       size_hint_y=None,height=dp(22),halign='center')
+        lay.add_widget(self._ul)
+        self._bl=self._btn('Se connecter',MS_ACCENT,self.app.do_login)
+        self._bp=self._btn('Mon profil',(0.15,0.15,0.2,1),self.app.open_profile)
+        self._bo=self._btn('Deconnexion',(0.3,0.1,0.1,1),self.app.do_logout)
+        self._bp.opacity=0; self._bp.disabled=True
+        self._bo.opacity=0; self._bo.disabled=True
+        bc=Button(text='Fermer',size_hint_y=None,height=dp(32),
+                  background_normal='',background_color=(0,0,0,0),
+                  color=MS_DIM,font_size=sp(12))
+        bc.bind(on_press=lambda *a:self.hide())
+        for w in (self._ul,self._bl,self._bp,self._bo,bc,Widget()): lay.add_widget(w)
+        self.add_widget(lay)
+    def _btn(self,t,c,fn):
+        b=Button(text=t,size_hint_y=None,height=dp(40),
+                 background_normal='',background_color=c,color=(1,1,1,1),font_size=sp(13))
+        b.bind(on_press=lambda *a:(fn(),self.hide())); return b
+    def refresh(self):
+        ok=is_logged(); self._ul.text=get_user() if ok else 'Non connecte'
+        self._ul.color=MS_TEXT if ok else MS_DIM
+        self._bl.opacity=0 if ok else 1; self._bl.disabled=ok
+        self._bp.opacity=1 if ok else 0; self._bp.disabled=not ok
+        self._bo.opacity=1 if ok else 0; self._bo.disabled=not ok
+    def show(self): self.refresh(); self._vis=True; self.opacity=1
+    def hide(self): self._vis=False; self.opacity=0
     def toggle(self):
-        if self._visible: self.hide()
+        if self._vis: self.hide()
         else: self.show()
 
-# ── Layout principal ──────────────────────────────────────────────────────────
+# === Root =====================================================================
 
 class Root(FloatLayout):
-    def __init__(self, app, **kwargs):
-        super().__init__(**kwargs)
-        self.app = app
-
+    def __init__(self,app,**kw):
+        super().__init__(**kw); self.app=app
         with self.canvas.before:
-            Color(*MS_BG)
-            self._bg = Rectangle(pos=self.pos, size=self.size)
-        self.bind(
-            pos =lambda *a: setattr(self._bg,'pos', self.pos),
-            size=lambda *a: setattr(self._bg,'size',self.size),
-        )
-
-        self.wv = AndroidWebView(size_hint=(1,1), pos_hint={'x':0,'y':0})
-        self.wv.on_title = self._on_title
-        self.wv.on_url   = self._on_url
+            Color(*MS_BG); self._bg=Rectangle(pos=self.pos,size=self.size)
+        self.bind(pos=lambda *a:setattr(self._bg,'pos',self.pos),
+                  size=lambda *a:setattr(self._bg,'size',self.size))
+        self.wv=MSWebView(size_hint=(1,1),pos_hint={'x':0,'y':0})
+        self.wv.on_title=self._on_title; self.wv.on_url=self._on_url
         self.add_widget(self.wv)
-
-        self.tb = Toolbar(app, size_hint=(1,None), pos_hint={'x':0,'top':1})
+        self.tb=Toolbar(app,size_hint=(1,None),pos_hint={'x':0,'top':1})
         self.add_widget(self.tb)
-
-        self.nav = BottomNav(app, size_hint=(1,None), pos_hint={'x':0,'y':0})
+        self.nav=BottomNav(app,size_hint=(1,None),pos_hint={'x':0,'y':0})
         self.add_widget(self.nav)
+        self.compose=ComposePage(app,size_hint=(1,1),pos_hint={'x':0,'y':0})
+        self.add_widget(self.compose)
+        self.call_ov=CallOverlay(app,size_hint=(1,1))
+        self.add_widget(self.call_ov)
+        self.acc=AccountPanel(app); self.add_widget(self.acc)
+        Clock.schedule_once(self._adj,0.3)
+        self.tb.bind(height=self._adj); self.nav.bind(height=self._adj)
+    def _adj(self,*a):
+        th=self.tb.height; nh=self.nav.height; h=self.height-th-nh
+        if h>0:
+            self.wv.size_hint=(1,None); self.wv.height=h; self.wv.y=nh
+            self.compose.size_hint=(1,None); self.compose.height=h; self.compose.y=nh
+    def on_size(self,*a): self._adj(); self._pp()
+    def _pp(self):
+        self.acc.pos=(self.width-self.acc.width-dp(8),
+                      self.height-self.tb.height-self.acc.height-dp(4))
+    def _on_title(self,title):
+        if title.startswith('__U:'):
+            name=title[4:].strip()
+            if name and not is_logged():
+                save_account(name,get_token())
+                Clock.schedule_once(lambda dt:self.app._after_login(name),0)
+        elif title.startswith('__CALL__:'):
+            parts=title.split(':')
+            caller=parts[1] if len(parts)>1 else 'Inconnu'
+            kind=parts[2] if len(parts)>2 else 'audio'
+            url=parts[3] if len(parts)>3 else ''
+            Clock.schedule_once(lambda dt:self.call_ov.show(caller,kind,url),0)
+        elif title.startswith('__TYPING__:'):
+            name=title[11:].strip()
+            Clock.schedule_once(lambda dt:self._typing(name),0)
+        else:
+            self.tb.set_title(title)
+    def _on_url(self,url):
+        self.tb.set_back(self.wv.can_back); self.nav.set_by_url(url)
+    def _typing(self,name):
+        self.tb.show_typing(name)
+        if self.compose._vis: self.compose.show_typing(name)
 
-        self.acc_panel = AccountPanel(app)
-        self.add_widget(self.acc_panel)
-
-        Clock.schedule_once(self._adjust, 0.3)
-        self.tb.bind(height=self._adjust)
-        self.nav.bind(height=self._adjust)
-
-    def _adjust(self, *a):
-        th = self.tb.height
-        nh = self.nav.height
-        h  = self.height - th - nh
-        if h > 0:
-            self.wv.size_hint = (1, None)
-            self.wv.height    = h
-            self.wv.y         = nh
-
-    def on_size(self, *a):
-        self._adjust()
-        self._pos_panel()
-
-    def _pos_panel(self):
-        self.acc_panel.pos = (
-            self.width - self.acc_panel.width - dp(8),
-            self.height - self.tb.height - self.acc_panel.height - dp(4),
-        )
-
-    def _on_title(self, title):
-        if title.startswith('__USER__:'):
-            name = title.split(':', 1)[1].strip()
-            if name and not is_logged_in():
-                save_account(name, get_fcm_token())
-                Clock.schedule_once(
-                    lambda dt: self.app._after_login(name), 0)
-            return
-        self.tb.set_title(title)
-
-    def _on_url(self, url):
-        self.tb.set_back(self.wv.can_back)
-        self.nav.set_active_by_url(url)
-
-# ── Polling ───────────────────────────────────────────────────────────────────
+# === Poller ===================================================================
 
 class Poller:
-    def __init__(self, app):
-        self.app  = app
-        self._run = False
-        self._last_msgs   = 0
-        self._last_notifs = 0
-
+    def __init__(self,app):
+        self.app=app; self._run=False; self._lm=0; self._ln=0
     def start(self):
         if self._run: return
-        self._run = True
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def stop(self):
-        self._run = False
-
+        self._run=True; threading.Thread(target=self._loop,daemon=True).start()
+    def stop(self): self._run=False
     def _loop(self):
         import urllib.request
         while self._run:
-            if is_logged_in():
-                for url, attr, key, nid, title in [
-                    (API_MSGS,   '_last_msgs',   'chat',   101, 'MoodSync Messages'),
-                    (API_NOTIFS, '_last_notifs', 'notifs', 103, 'MoodSync'),
+            if is_logged():
+                for url,attr,key,nid,title in [
+                    (API_MSGS,'_lm','chat',101,'MoodSync Messages'),
+                    (API_NOTIFS,'_ln','notifs',103,'MoodSync'),
                 ]:
                     try:
-                        r = urllib.request.urlopen(url, timeout=5)
-                        d = json.loads(r.read().decode())
-                        n = int(d.get('count', 0))
-                        if n != getattr(self, attr):
-                            setattr(self, attr, n)
-                            Clock.schedule_once(
-                                lambda dt, k=key, c=n:
-                                    self.app.set_badge(k, c), 0)
-                            if n > 0:
-                                body = (f'{n} nouveau(x) message(s)'
-                                        if key == 'chat'
-                                        else f'{n} nouvelle(s) notification(s)')
+                        r=urllib.request.urlopen(url,timeout=5)
+                        n=int(json.loads(r.read().decode()).get('count',0))
+                        if n!=getattr(self,attr):
+                            setattr(self,attr,n)
+                            Clock.schedule_once(lambda dt,k=key,c=n:self.app.set_badge(k,c),0)
+                            if n>0:
+                                body=(f'{n} message(s)' if key=='chat' else f'{n} notification(s)')
                                 Clock.schedule_once(
-                                    lambda dt, t=title, b=body, i=nid:
-                                        send_notif(t, b, i), 0)
-                    except:
-                        pass
+                                    lambda dt,t=title,b=body,i=nid:
+                                    (push_notif(t,b,i),play_sound(),vibrate(180)),0)
+                    except: pass
             time.sleep(15)
 
-# ── FCM register ─────────────────────────────────────────────────────────────
+# === App ======================================================================
 
-def register_fcm(token):
-    def _do():
-        import urllib.request, urllib.parse
+BRIDGE_JS="""(function(){
+  if(window.__ms_bridge)return;window.__ms_bridge=true;
+  var _P=window.Peer;
+  if(_P){var _on=_P.prototype.on;_P.prototype.on=function(ev,cb){
+    if(ev==='call'){return _on.call(this,ev,function(call){
+      window.__activePeerCall=call;
+      document.title='__CALL__:'+(call.metadata&&call.metadata.from_name||call.peer)+
+        ':'+(call.metadata&&call.metadata.video?'video':'audio')+':'+window.location.href;
+      cb(call);});}
+    return _on.call(this,ev,cb);
+  };}
+})();"""
+
+def _register_fcm():
+    def _f():
+        import urllib.request,urllib.parse
         try:
-            body = urllib.parse.urlencode({
-                'token':    token,
-                'username': get_username(),
-                'platform': 'android',
-            }).encode()
-            urllib.request.urlopen(API_FCM_REG, body, timeout=5)
-        except Exception as e:
-            print("FCM register error:", e)
-    threading.Thread(target=_do, daemon=True).start()
+            urllib.request.urlopen(API_FCM_REG,
+                urllib.parse.urlencode({
+                    'token':get_token(),'username':get_user(),'platform':'android'
+                }).encode(),timeout=5)
+        except Exception as e: print("fcm_reg:",e)
+    threading.Thread(target=_f,daemon=True).start()
 
-# ── App ───────────────────────────────────────────────────────────────────────
 
 class MoodSyncApp(App):
     def build(self):
-        Window.clearcolor = MS_BG
-        if platform == 'android':
-            Window.fullscreen = True
-            create_notif_channel()
-
-        self.layout  = Root(self)
-        self.poller  = Poller(self)
-
-        # FCM token
-        get_fcm_token_android(self._on_fcm)
-
-        # Démarrer le polling si déjà connecté
-        if is_logged_in():
-            self.poller.start()
-            self.layout.tb.update_av()
-
-        # Timers
-        Clock.schedule_interval(self._detect_login, 5)
-
-        # Bouton retour Android
-        if platform == 'android':
+        Window.clearcolor=MS_BG
+        if platform=='android': Window.fullscreen=True
+        try: create_channels()
+        except Exception as e: print("channels:",e)
+        self.layout=Root(self); self.poller=Poller(self)
+        try: get_fcm_token_android(self._on_fcm)
+        except Exception as e: print("fcm_init:",e)
+        if is_logged(): self.poller.start(); self.layout.tb.update_av()
+        Clock.schedule_interval(self._detect_login,5)
+        Clock.schedule_interval(self._inject_bridge,10)
+        if platform=='android':
             try:
                 from android import activity
                 activity.bind(on_key_down=self._key_down)
-            except Exception as e:
-                print("key bind error:", e)
-
+            except Exception as e: print("key_bind:",e)
         return self.layout
 
     @property
-    def webview(self):
-        return self.layout.wv
-
-    # ── Navigation ────────────────────────────────────────────────────────────
-
+    def webview(self): return self.layout.wv
     def go_back(self):
-        self.layout.wv.back()
-
-    def reload_page(self):
-        self.layout.wv.reload()
-
-    def set_badge(self, key, n):
-        self.layout.nav.set_badge(key, n)
-
-    # ── Compte ────────────────────────────────────────────────────────────────
-
-    def toggle_account(self):
-        self.layout._pos_panel()
-        self.layout.acc_panel.toggle()
-
-    def do_login(self):
-        self.layout.wv.load(LOGIN_URL)
-
+        if self.layout.compose._vis: self.layout.compose.hide()
+        else: self.layout.wv.back()
+    def reload_page(self): self.layout.wv.reload()
+    def set_badge(self,k,n): self.layout.nav.set_badge(k,n)
+    def show_compose(self): self.layout.compose.show()
+    def do_login(self): self.layout.wv.load(LOGIN_URL)
+    def open_profile(self): self.layout.wv.load(PROFILE_URL)
+    def toggle_account(self): self.layout._pp(); self.layout.acc.toggle()
     def do_logout(self):
-        clear_account()
-        self.layout.tb.update_av()
-        self.poller.stop()
-        self.layout.wv.clear_cookies()
-        self.layout.wv.load(LOGIN_URL)
-
-    def open_profile(self):
-        self.layout.wv.load(PROFILE_URL)
-
-    def _after_login(self, name):
-        """Appelé après détection de la connexion."""
-        self.layout.tb.update_av()
-        self.layout.acc_panel.refresh()
+        clear_account(); self.layout.tb.update_av(); self.poller.stop()
+        self.layout.wv.clear_cookies(); self.layout.wv.load(LOGIN_URL)
+    def _after_login(self,name):
+        self.layout.tb.update_av(); self.layout.acc.refresh()
         self.poller.start()
-        tok = get_fcm_token()
-        if tok:
-            register_fcm(tok)
-
-    # ── FCM ───────────────────────────────────────────────────────────────────
-
-    def _on_fcm(self, token):
+        if get_token(): _register_fcm()
+    def _on_fcm(self,token):
         if not token: return
-        save_fcm_token(token)
-        if is_logged_in():
-            register_fcm(token)
-
-    # ── Détection login ───────────────────────────────────────────────────────
-
-    def _detect_login(self, dt):
-        url = self.layout.wv.current_url
-        if 'moodsync' not in url and 'alwaysdata' not in url:
-            return
+        save_token(token)
+        if is_logged(): _register_fcm()
+    def _detect_login(self,dt):
+        url=self.layout.wv.current_url
+        if 'moodsync' not in url and 'alwaysdata' not in url: return
         self.layout.wv.run_js(
-            "(function(){"
-            "var m=document.querySelector('meta[name=\"username\"]');"
-            "if(m&&m.content){document.title='__USER__:'+m.content;return;}"
+            "(function(){var m=document.querySelector('meta[name=\"username\"]');"
+            "if(m&&m.content){document.title='__U:'+m.content;return;}"
             "var d=document.querySelector('[data-username]');"
-            "if(d)document.title='__USER__:'+d.getAttribute('data-username');"
-            "})()"
-        )
-
-    # ── Bouton retour Android ─────────────────────────────────────────────────
-
-    def _key_down(self, keycode, *a):
-        if keycode == 27:
-            if self.layout.acc_panel._visible:
-                self.layout.acc_panel.hide()
-                return True
-            if self.layout.wv.can_back:
-                self.layout.wv.back()
-                return True
+            "if(d)document.title='__U:'+d.getAttribute('data-username');})()")
+    def _inject_bridge(self,dt):
+        url=self.layout.wv.current_url
+        if 'moodsync' in url or 'alwaysdata' in url:
+            self.layout.wv.run_js(BRIDGE_JS)
+    def _key_down(self,keycode,*a):
+        if keycode==27:
+            if self.layout.call_ov._vis: self.layout.call_ov.decline(); return True
+            if self.layout.acc._vis: self.layout.acc.hide(); return True
+            if self.layout.compose._vis: self.layout.compose.hide(); return True
+            if self.layout.wv.can_back: self.layout.wv.back(); return True
         return False
-
-    def on_stop(self):
-        self.poller.stop()
-
+    def on_stop(self): self.poller.stop()
 
 if __name__ == '__main__':
     MoodSyncApp().run()
