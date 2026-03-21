@@ -229,7 +229,12 @@ def get_fcm_token_android(cb):
             @java_method('(Ljava/lang/Object;)V')
             def onSuccess(self, result):
                 _log("FCM", f"token OK: {str(result)[:20]}...")
-                Clock.schedule_once(lambda dt: cb(str(result)), 0)
+                def _f(dt):
+                    try:
+                        cb(str(result))
+                    except Exception as e:
+                        _log("FCM", f"onSuccess callback error: {e}")
+                Clock.schedule_once(_f, 0)
         _FM.getInstance().getToken().addOnSuccessListener(L())
     except Exception as e:
         _log("FCM", f"ERREUR: {e}")
@@ -261,21 +266,34 @@ if _wv_ok:
             def onPageStarted(self, wv, url, fav):
                 self._w.current_url = url or ""
                 if self._w.on_url:
-                    Clock.schedule_once(lambda dt, u=url: self._w.on_url(u or ""), 0)
+                    def _cb(dt):
+                        try:
+                            self._w.on_url(url or "")
+                        except Exception as e:
+                            _log("WV", f"on_url callback error: {e}")
+                    Clock.schedule_once(_cb, 0)
             def onPageFinished(self, wv, url):
                 self._w.current_url = url or ""
                 self._w.can_back = wv.canGoBack()
                 self._w.can_fwd  = wv.canGoForward()
                 t = wv.getTitle()
                 if t and self._w.on_title:
-                    Clock.schedule_once(lambda dt, _t=str(t): self._w.on_title(_t), 0)
-                wv.evaluateJavascript(
-                    "(function(){"
-                    "var m=document.querySelector('meta[name=\"username\"]');"
-                    "if(m&&m.content){document.title='__U:'+m.content;return;}"
-                    "var d=document.querySelector('[data-username]');"
-                    "if(d)document.title='__U:'+d.getAttribute('data-username');"
-                    "})()", None)
+                    def _cb(dt):
+                        try:
+                            self._w.on_title(str(t))
+                        except Exception as e:
+                            _log("WV", f"on_title callback error: {e}")
+                    Clock.schedule_once(_cb, 0)
+                try:
+                    wv.evaluateJavascript(
+                        "(function(){"
+                        "var m=document.querySelector('meta[name=\"username\"]');"
+                        "if(m&&m.content){document.title='__U:'+m.content;return;}"
+                        "var d=document.querySelector('[data-username]');"
+                        "if(d)document.title='__U:'+d.getAttribute('data-username');"
+                        "})()", None)
+                except Exception as e:
+                    _log("WV", f"evaluateJavascript error: {e}")
             def shouldOverrideUrlLoading(self, wv, url): return False
         _log("WV", "WebViewClient OK")
     except Exception as e:
@@ -297,6 +315,9 @@ class MSWebView(Widget):
         if _wv_ok:
             Clock.schedule_once(self._create, 0)
             self.bind(pos=self._upd, size=self._upd)
+        else:
+            lbl = Label(text="WebView non disponible.\nVérifiez les permissions et l'installation.", color=MS_RED, halign='center', valign='middle', font_size=sp(16))
+            self.add_widget(lbl)
 
     def _create(self, *a):
         if not _wv_ok: return
@@ -908,26 +929,32 @@ class Root(FloatLayout):
         self.acc.pos = (self.width-self.acc.width-dp(8),
                         self.height-self.tb.height-self.acc.height-dp(4))
     def _on_title(self, title):
-        if title.startswith('__U:'):
-            name = title[4:].strip()
-            if name and not is_logged():
-                save_account(name, get_token())
-                Clock.schedule_once(lambda dt: self.app._after_login(name), 0)
-        elif title.startswith('__CALL__:'):
-            parts = title.split(':')
-            caller = parts[1] if len(parts)>1 else 'Inconnu'
-            kind   = parts[2] if len(parts)>2 else 'audio'
-            url    = parts[3] if len(parts)>3 else ''
-            Clock.schedule_once(
-                lambda dt: self.call_ov.show(caller, kind, url), 0)
-        elif title.startswith('__TYPING__:'):
-            name = title[11:].strip()
-            Clock.schedule_once(lambda dt: self._typing(name), 0)
-        else:
-            self.tb.set_title(title)
+        try:
+            if title.startswith('__U:'):
+                name = title[4:].strip()
+                if name and not is_logged():
+                    save_account(name, get_token())
+                    Clock.schedule_once(lambda dt: self.app._after_login(name), 0)
+            elif title.startswith('__CALL__:'):
+                parts = title.split(':')
+                caller = parts[1] if len(parts)>1 else 'Inconnu'
+                kind   = parts[2] if len(parts)>2 else 'audio'
+                url    = parts[3] if len(parts)>3 else ''
+                Clock.schedule_once(
+                    lambda dt: self.call_ov.show(caller, kind, url), 0)
+            elif title.startswith('__TYPING__:'):
+                name = title[11:].strip()
+                Clock.schedule_once(lambda dt: self._typing(name), 0)
+            else:
+                self.tb.set_title(title)
+        except Exception as e:
+            _log("ROOT", f"_on_title error: {e}")
     def _on_url(self, url):
-        self.tb.set_back(self.wv.can_back)
-        self.nav.set_by_url(url)
+        try:
+            self.tb.set_back(self.wv.can_back)
+            self.nav.set_by_url(url)
+        except Exception as e:
+            _log("ROOT", f"_on_url error: {e}")
     def _typing(self, name):
         self.tb.show_typing(name)
         if self.compose._vis: self.compose.show_typing(name)
@@ -1047,9 +1074,12 @@ class MoodSyncApp(App):
         self.poller.start()
         if get_token(): _register_fcm()
     def _on_fcm(self, token):
-        if not token: return
-        save_token(token)
-        if is_logged(): _register_fcm()
+        try:
+            if not token: return
+            save_token(token)
+            if is_logged(): _register_fcm()
+        except Exception as e:
+            _log("APP", f"_on_fcm error: {e}")
     def _detect_login(self, dt):
         url = self.layout.wv.current_url
         if 'moodsync' not in url and 'alwaysdata' not in url: return
