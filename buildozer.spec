@@ -17,32 +17,20 @@ android.permissions = \
     RECORD_AUDIO,\
     MODIFY_AUDIO_SETTINGS,\
     VIBRATE,\
-    WAKE_LOCK,\
-    POST_NOTIFICATIONS,\
-    READ_EXTERNAL_STORAGE,\
-    WRITE_EXTERNAL_STORAGE
+    WAKE_LOCK
 
 android.api             = 34
-android.minapi          = 26
+android.minapi          = 21
 android.ndk             = 25b
-android.ndk_api         = 26
+android.ndk_api         = 21
 android.sdk             = 34
 android.accept_sdk_license = True
 android.archs           = arm64-v8a, armeabi-v7a
-
-android.gradle_dependencies = \
-    com.google.firebase:firebase-messaging:23.1.2,\
-    androidx.core:core:1.9.0
-
-android.gradle_plugins = com.google.gms:google-services:4.3.15
 
 android.entrypoint  = org.kivy.android.PythonActivity
 android.apptheme    = @android:style/Theme.NoTitleBar
 orientation         = portrait
 presplash.color     = #161619
-
-android.meta_data = \
-    com.google.firebase.messaging.default_notification_channel_id=moodsync_channel
 
 p4a.branch = develop
 
