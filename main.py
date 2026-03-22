@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MoodSync Browser — WebView simple"""
+"""MoodSync Browser v2 — WebView fixée"""
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -14,54 +14,52 @@ from kivy.metrics import dp, sp
 from kivy.clock import Clock
 from kivy.properties import StringProperty, BooleanProperty
 
-HOME_URL  = "https://moodsync.alwaysdata.net"
-LOGIN_URL = HOME_URL + "/login.php"
+HOME_URL = "https://moodsync.alwaysdata.net"
 
 MS_BG   = (0.086, 0.086, 0.102, 1)
 MS_TOOL = (0.090, 0.090, 0.118, 1)
 MS_TEXT = (0.910, 0.902, 0.941, 1)
 MS_DIM  = (0.533, 0.502, 0.627, 1)
 
-# ── WebView Android ───────────────────────────────────────────────────────────
-
 if platform == "android":
     try:
         from android.runnable import run_on_ui_thread
         from jnius import autoclass
 
-        PythonActivity  = autoclass("org.kivy.android.PythonActivity")
-        WebView         = autoclass("android.webkit.WebView")
-        WebViewClient   = autoclass("android.webkit.WebViewClient")
-        WebChromeClient = autoclass("android.webkit.WebChromeClient")
-        CookieManager   = autoclass("android.webkit.CookieManager")
-        LayoutParams    = autoclass("android.view.ViewGroup$LayoutParams")
-        Color_java      = autoclass("android.graphics.Color")
+        PA  = autoclass("org.kivy.android.PythonActivity")
+        WV  = autoclass("android.webkit.WebView")
+        WVC = autoclass("android.webkit.WebViewClient")
+        WCC = autoclass("android.webkit.WebChromeClient")
+        CM  = autoclass("android.webkit.CookieManager")
+        LP  = autoclass("android.view.ViewGroup$LayoutParams")
+        CJ  = autoclass("android.graphics.Color")
 
-        class SimpleClient(WebViewClient):
-            def __init__(self, w):
+        class _Client(WVC):
+            def __init__(self, cb_back):
                 super().__init__()
-                self._w = w
+                self._cb = cb_back
             def onPageFinished(self, wv, url):
-                self._w.current_url = url or ""
-                self._w.can_back = wv.canGoBack()
+                self._cb(wv.canGoBack())
             def shouldOverrideUrlLoading(self, wv, url):
                 return False
 
         class MSWebView(Widget):
-            current_url = StringProperty("")
-            can_back    = BooleanProperty(False)
+            can_back = BooleanProperty(False)
 
             def __init__(self, **kw):
                 super().__init__(**kw)
                 self._wv = None
+                self._loaded = False
+                # Créer la WebView immédiatement
                 Clock.schedule_once(self._create, 0)
-                self.bind(pos=self._upd, size=self._upd)
+                # Repositionner à chaque changement
+                self.bind(pos=self._schedule_upd, size=self._schedule_upd)
 
             @run_on_ui_thread
             def _create(self, *a):
-                act = PythonActivity.mActivity
-                CookieManager.getInstance().setAcceptCookie(True)
-                self._wv = WebView(act)
+                act = PA.mActivity
+                CM.getInstance().setAcceptCookie(True)
+                self._wv = WV(act)
                 s = self._wv.getSettings()
                 s.setJavaScriptEnabled(True)
                 s.setDomStorageEnabled(True)
@@ -73,55 +71,78 @@ if platform == "android":
                 s.setMixedContentMode(0)
                 s.setAllowFileAccess(True)
                 s.setUserAgentString(
-                    s.getUserAgentString() + " MoodSyncBrowser/1.0")
-                self._wv.setWebViewClient(SimpleClient(self))
-                self._wv.setWebChromeClient(WebChromeClient())
-                self._wv.setBackgroundColor(Color_java.parseColor("#161619"))
+                    s.getUserAgentString() + " MoodSyncApp/1.0")
+                self._wv.setWebViewClient(_Client(self._set_back))
+                self._wv.setWebChromeClient(WCC())
+                self._wv.setBackgroundColor(CJ.parseColor("#161619"))
                 act.addContentView(self._wv,
-                    LayoutParams(LayoutParams.MATCH_PARENT,
-                                 LayoutParams.MATCH_PARENT))
-                self._wv.loadUrl(HOME_URL)
-                Clock.schedule_once(self._upd, 0.2)
+                    LP(LP.MATCH_PARENT, LP.MATCH_PARENT))
+                # Charger l'URL après un délai pour laisser le temps au layout
+                Clock.schedule_once(self._first_load, 0.5)
 
-            @run_on_ui_thread
-            def _upd(self, *a):
+            def _first_load(self, *a):
+                self._do_upd()
+                # Charger l'URL après positionnement
+                Clock.schedule_once(self._do_load, 0.2)
+
+            def _do_load(self, *a):
+                if self._wv:
+                    self._do_run_on_ui(lambda: self._wv.loadUrl(HOME_URL))
+
+            def _set_back(self, v):
+                self.can_back = v
+
+            def _schedule_upd(self, *a):
+                Clock.schedule_once(lambda dt: self._do_upd(), 0)
+
+            def _do_upd(self, *a):
+                self._do_run_on_ui(self._upd_ui)
+
+            def _do_run_on_ui(self, fn):
+                @run_on_ui_thread
+                def _wrap():
+                    fn()
+                _wrap()
+
+            def _upd_ui(self):
                 if not self._wv: return
-                from kivy.core.window import Window as W
-                self._wv.setX(int(self.x))
-                self._wv.setY(int(W.height - self.y - self.height))
+                x = int(self.x)
+                y = int(Window.height - self.y - self.height)
+                w = int(self.width)
+                h = int(self.height)
+                if w <= 0 or h <= 0: return
+                self._wv.setX(x)
+                self._wv.setY(y)
                 lp = self._wv.getLayoutParams()
-                lp.width  = int(self.width)
-                lp.height = int(self.height)
+                lp.width  = w
+                lp.height = h
                 self._wv.setLayoutParams(lp)
                 self._wv.requestLayout()
 
-            @run_on_ui_thread
             def load(self, url):
-                if self._wv: self._wv.loadUrl(url)
+                if self._wv:
+                    self._do_run_on_ui(lambda: self._wv.loadUrl(url))
 
-            @run_on_ui_thread
             def back(self):
-                if self._wv and self._wv.canGoBack():
-                    self._wv.goBack()
+                if self._wv:
+                    self._do_run_on_ui(
+                        lambda: self._wv.goBack()
+                            if self._wv.canGoBack() else None)
 
-            @run_on_ui_thread
             def reload(self):
-                if self._wv: self._wv.reload()
+                if self._wv:
+                    self._do_run_on_ui(lambda: self._wv.reload())
 
     except Exception as e:
         print("Android error:", e)
-
         class MSWebView(Widget):
-            current_url = StringProperty("")
-            can_back    = BooleanProperty(False)
+            can_back = BooleanProperty(False)
             def load(self, url): pass
             def back(self): pass
             def reload(self): pass
-
 else:
     class MSWebView(Widget):
-        current_url = StringProperty("")
-        can_back    = BooleanProperty(False)
+        can_back = BooleanProperty(False)
         def load(self, url): pass
         def back(self): pass
         def reload(self): pass
@@ -145,28 +166,24 @@ class Toolbar(BoxLayout):
         self.btn_back = Button(
             text='<', font_size=sp(20), bold=True,
             size_hint=(None,None), size=(dp(40),dp(38)),
-            background_normal='', background_color=(0,0,0,0),
-            color=MS_DIM)
+            background_normal='', background_color=(0,0,0,0), color=MS_DIM)
         self.btn_back.bind(on_press=lambda *a: self.app.go_back())
 
         self.title = Label(
             text='MoodSync', font_size=sp(16), bold=True,
-            color=MS_TEXT, size_hint_x=1,
-            halign='left', valign='middle')
+            color=MS_TEXT, size_hint_x=1, halign='left', valign='middle')
         self.title.bind(size=self.title.setter('text_size'))
 
         self.btn_home = Button(
             text='H', font_size=sp(14), bold=True,
             size_hint=(None,None), size=(dp(40),dp(38)),
-            background_normal='', background_color=(0,0,0,0),
-            color=MS_DIM)
+            background_normal='', background_color=(0,0,0,0), color=MS_DIM)
         self.btn_home.bind(on_press=lambda *a: self.app.go_home())
 
         self.btn_rel = Button(
             text='R', font_size=sp(16), bold=True,
             size_hint=(None,None), size=(dp(40),dp(38)),
-            background_normal='', background_color=(0,0,0,0),
-            color=MS_DIM)
+            background_normal='', background_color=(0,0,0,0), color=MS_DIM)
         self.btn_rel.bind(on_press=lambda *a: self.app.reload_page())
 
         inner.add_widget(self.btn_back)
@@ -175,8 +192,6 @@ class Toolbar(BoxLayout):
         inner.add_widget(self.btn_rel)
         self.add_widget(inner)
 
-    def set_title(self, t):
-        self.title.text = t[:28]+('...' if len(t)>28 else '')
     def set_back(self, v):
         self.btn_back.color = MS_TEXT if v else MS_DIM
 
@@ -192,25 +207,27 @@ class Root(FloatLayout):
         self.bind(pos=lambda *a: setattr(self._bg,'pos',self.pos),
                   size=lambda *a: setattr(self._bg,'size',self.size))
 
+        # WebView en bas
         self.wv = MSWebView(size_hint=(1,1), pos_hint={'x':0,'y':0})
+        self.wv.bind(can_back=lambda *a: self.tb.set_back(self.wv.can_back))
         self.add_widget(self.wv)
 
+        # Toolbar par-dessus
         self.tb = Toolbar(app, size_hint=(1,None), pos_hint={'x':0,'top':1})
         self.add_widget(self.tb)
 
-        Clock.schedule_once(self._adj, 0.3)
+        # Ajuster la hauteur de la WebView
+        Clock.schedule_once(self._adj, 0.1)
+        self.bind(size=self._adj)
         self.tb.bind(height=self._adj)
 
     def _adj(self, *a):
         th = self.tb.height
         h  = self.height - th
         if h > 0:
-            self.wv.size_hint = (1,None)
+            self.wv.size_hint = (1, None)
             self.wv.height    = h
             self.wv.y         = 0
-
-    def on_size(self, *a):
-        self._adj()
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -226,17 +243,16 @@ class MoodSyncApp(App):
             try:
                 from android import activity
                 activity.bind(on_key_down=self._key_down)
-            except Exception as e:
-                print("key bind:", e)
+            except: pass
 
         return self.layout
 
     @property
     def webview(self): return self.layout.wv
 
-    def go_back(self):    self.layout.wv.back()
-    def go_home(self):    self.layout.wv.load(HOME_URL)
-    def reload_page(self):self.layout.wv.reload()
+    def go_back(self):     self.layout.wv.back()
+    def go_home(self):     self.layout.wv.load(HOME_URL)
+    def reload_page(self): self.layout.wv.reload()
 
     def _key_down(self, keycode, *a):
         if keycode == 27:
