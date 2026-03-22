@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MoodSync Browser v2 — WebView fixée"""
+"""MoodSync Browser v2 — WebbbView fixée"""
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
